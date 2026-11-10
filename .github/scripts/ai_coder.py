@@ -13,7 +13,7 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 # Используем модель с огромным контекстом, чтобы влез весь проект
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 exclude_dirs = {".git", ".github", "build", ".gradle", ".idea"}
 include_extensions = {".kt", ".java", ".xml", ".gradle", ".properties"}
