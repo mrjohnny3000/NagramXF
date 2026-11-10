@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import time
 import google.generativeai as genai
 
 api_key = os.getenv("GEMINI_API_KEY")
@@ -12,17 +13,19 @@ if not api_key:
     exit(1)
 
 genai.configure(api_key=api_key)
-# Используем модель с огромным контекстом, чтобы влез весь проект
 model = genai.GenerativeModel("gemini-3.8-flash")
 
-
-exclude_dirs = {".git", ".github", "build", ".gradle", ".idea"}
-include_extensions = {".kt", ".java", ".xml", ".gradle", ".properties"}
+# Ограничиваем сканирование, чтобы не вылетать за 250k токенов/мин
+exclude_dirs = {
+    ".git", ".github", "build", ".gradle", ".idea", 
+    "gradle", "bin", "out", "libs", "res"  # Исключаем тяжелые ресурсы
+}
+include_extensions = {".kt", ".java", ".xml"}
 
 codebase = {}
-file_list = []
+max_file_size_bytes = 60 * 1024  # Пропускаем гигантские файлы >60КБ
 
-print("Scanning repository codebase...")
+print("Scanning repository codebase (optimized)...")
 for root, dirs, files in os.walk("."):
     dirs[:] = [d for d in dirs if d not in exclude_dirs]
     for file in files:
@@ -30,36 +33,52 @@ for root, dirs, files in os.walk("."):
         if ext in include_extensions:
             path = os.path.join(root, file)
             rel_path = os.path.relpath(path, ".")
-            file_list.append(rel_path)
+            
+            # Пропускаем автосгенерированные или слишком большие файлы
+            if os.path.getsize(path) > max_file_size_bytes:
+                print(f"Skipping heavy file: {rel_path}")
+                continue
+                
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     codebase[rel_path] = f.read()
             except Exception as e:
                 print(f"Skipping {rel_path}: {e}")
 
-print(f"Loaded {len(codebase)} files into context.")
+print(f"Loaded {len(codebase)} key files into context.")
 
 prompt = f"""
 You are an expert Android developer modifying a Telegram client fork (NagramXF).
-A user created a GitHub Issue with the following task:
+A user created a GitHub Issue:
 Title: {issue_title}
 Body: {issue_body}
 
-Here is the project file structure and file contents:
+Project files:
 {json.dumps(codebase, indent=2)}
 
-Task: Analyze the issue, modify the existing files or create new ones necessary to implement the requested feature or fix the bug.
-Response format: You MUST return ONLY a valid JSON object where keys are relative file paths and values are the complete new contents of the modified files. Do not include markdown code block formatting like ```json or any other text outside the JSON object. Example format:
+Task: Analyze the issue, modify existing files or create new ones to fulfill the request.
+Response format: Return ONLY a valid JSON object mapping relative file paths to complete new file contents. Do NOT use markdown fences like ```json.
+Example:
 {{
-  "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java": "updated content here..."
+  "TMessagesProj/src/main/java/org/telegram/ui/MyFeature.java": "content..."
 }}
 """
 
-print("Sending context and prompt to Gemini...")
-response = model.generate_content(prompt)
-text_response = response.text.strip()
+print("Sending context to Gemini...")
 
-# Очистка от маркдауна на всякий случай
+# Обработка лимитов API с повторной попыткой
+for attempt in range(3):
+    try:
+        response = model.generate_content(prompt)
+        text_response = response.text.strip()
+        break
+    except Exception as e:
+        if "429" in str(e) and attempt < 2:
+            print("Rate limit reached. Waiting 60 seconds before retrying...")
+            time.sleep(60)
+        else:
+            raise e
+
 if text_response.startswith("```"):
     lines = text_response.splitlines()
     if lines[0].startswith("```"):
@@ -82,7 +101,7 @@ for path, content in changes.items():
         f.write(content)
     print(f"Updated: {path}")
 
-# Конфиг гита и пуш в новую ветку
+# Настройка Git и пуш
 subprocess.run(["git", "config", "--global", "user.name", "AI Coder Bot"], check=True)
 subprocess.run(["git", "config", "--global", "user.email", "ai-bot@users.noreply.github.com"], check=True)
 
@@ -96,7 +115,6 @@ if not status.stdout.strip():
     exit(0)
 
 subprocess.run(["git", "commit", "-m", f"AI Fix: {issue_title}"], check=True)
-# Настраиваем пуш с токеном GITHUB_TOKEN
 repo_url = f"https://x-access-token:{os.getenv('GITHUB_TOKEN')}@github.com/{os.getenv('GITHUB_REPOSITORY')}.git"
 subprocess.run(["git", "push", "origin", branch_name], check=True)
 print(f"Pushed branch {branch_name} successfully!")
